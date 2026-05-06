@@ -57,6 +57,7 @@ class StatsClient:
 
     def _run(self) -> None:
         backoff = RECONNECT_BACKOFF_START_S
+        self._decoder = json.JSONDecoder()
         while not self._stop.is_set():
             try:
                 self._on_status("connecting")
@@ -74,32 +75,48 @@ class StatsClient:
         self._on_status("stopped")
 
     def _read_loop(self, sock: socket.socket) -> None:
-        buf = bytearray()
+        # The Stats API emits a stream of concatenated JSON objects with no
+        # delimiter (`}{`). Use raw_decode to peel one object at a time.
+        buf = ""
         while not self._stop.is_set():
             chunk = sock.recv(4096)
             if not chunk:
                 return  # peer closed
-            buf.extend(chunk)
+            buf += chunk.decode("utf-8", errors="replace")
             while True:
-                nl = buf.find(b"\n")
-                if nl < 0:
+                stripped = buf.lstrip()
+                if not stripped:
+                    buf = stripped
                     break
-                line = bytes(buf[:nl]).strip()
-                del buf[: nl + 1]
-                if not line:
-                    continue
-                self._handle_line(line)
+                try:
+                    obj, end = self._decoder.raw_decode(stripped)
+                except json.JSONDecodeError:
+                    # Incomplete object; wait for more bytes.
+                    buf = stripped
+                    break
+                buf = stripped[end:]
+                self._handle_event(obj)
 
-    def _handle_line(self, line: bytes) -> None:
+    def _handle_event(self, event: object) -> None:
+        if not isinstance(event, dict):
+            return
+        # `Data` arrives as a JSON-encoded string; unwrap it so consumers see
+        # a real dict.
+        data = event.get("Data") if "Data" in event else event.get("data")
+        if isinstance(data, str):
+            try:
+                parsed = json.loads(data)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                if "Data" in event:
+                    event["Data"] = parsed
+                else:
+                    event["data"] = parsed
         if self._dump_fp is not None:
             try:
-                self._dump_fp.write(line.decode("utf-8", errors="replace") + "\n")
+                self._dump_fp.write(json.dumps(event) + "\n")
                 self._dump_fp.flush()
             except Exception:
                 pass
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return
-        if isinstance(event, dict):
-            self.events.put(event)
+        self.events.put(event)
