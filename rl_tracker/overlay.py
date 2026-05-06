@@ -8,12 +8,18 @@ from PyQt6.QtGui import QAction, QColor, QFont, QPainter
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from .config import state_file
+from .history import HistoryStore
 from .session import SessionState
 from .stats_client import StatsClient
 
 
 class Overlay(QWidget):
-    def __init__(self, session: SessionState, client: StatsClient) -> None:
+    def __init__(
+        self,
+        session: SessionState,
+        client: StatsClient,
+        history: HistoryStore | None = None,
+    ) -> None:
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
@@ -26,9 +32,14 @@ class Overlay(QWidget):
 
         self._session = session
         self._client = client
+        self._history = history
+        self._history_window = None  # lazy
         self._status = "starting"
         self._click_through = False
         self._drag_offset: QPoint | None = None
+
+        if history is not None:
+            session.on_match_recorded = lambda _m: self._notify_history_window()
 
         self._restore_position()
 
@@ -128,6 +139,12 @@ class Overlay(QWidget):
         ct_act.triggered.connect(self._toggle_click_through)
         menu.addAction(ct_act)
 
+        if self._history is not None:
+            menu.addSeparator()
+            hist_act = QAction("Match history…", self)
+            hist_act.triggered.connect(self._open_history)
+            menu.addAction(hist_act)
+
         menu.addSeparator()
         quit_act = QAction("Quit", self)
         quit_act.triggered.connect(self._quit)
@@ -138,6 +155,26 @@ class Overlay(QWidget):
     def _reset(self) -> None:
         self._session.reset()
         self.update()
+
+    def _open_history(self) -> None:
+        if self._history is None:
+            return
+        if self._history_window is None:
+            from .history_window import HistoryWindow
+
+            def on_set_platform_id(pid: str) -> None:
+                self._session.my_platform_id = pid
+
+            self._history_window = HistoryWindow(
+                self._history, on_set_platform_id=on_set_platform_id
+            )
+        self._history_window.show()
+        self._history_window.raise_()
+        self._history_window.activateWindow()
+
+    def _notify_history_window(self) -> None:
+        if self._history_window is not None:
+            self._history_window.notify_new_match()
 
     def _toggle_click_through(self) -> None:
         self._click_through = not self._click_through

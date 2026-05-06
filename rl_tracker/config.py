@@ -26,3 +26,34 @@ def appdata_dir() -> Path:
 
 def state_file() -> Path:
     return appdata_dir() / "state.json"
+
+
+def settings_file() -> Path:
+    return appdata_dir() / "settings.json"
+
+
+def history_db_path() -> Path:
+    return appdata_dir() / "history.db"
+
+
+def load_my_platform_id() -> str | None:
+    import json
+
+    try:
+        data = json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    val = data.get("my_platform_id")
+    return val if isinstance(val, str) and val else None
+
+
+def save_my_platform_id(platform_id: str) -> None:
+    import json
+
+    settings_file().parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data["my_platform_id"] = platform_id
+    settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
