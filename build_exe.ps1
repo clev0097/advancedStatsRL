@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 
-pyinstaller `
+python -m PyInstaller `
     --noconfirm `
     --onefile `
     --windowed `
