@@ -18,8 +18,31 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .config import load_my_platform_id, save_my_platform_id
+from datetime import datetime
+
+from .config import (
+    load_my_platform_id,
+    load_session_gap_minutes,
+    save_my_platform_id,
+)
 from .history import HistoryStore
+
+
+def _format_local(dt_or_iso) -> str:
+    """Format an ISO string or datetime as 'Mon May 5, 7:32 PM' in local time."""
+    if dt_or_iso is None:
+        return ""
+    if isinstance(dt_or_iso, str):
+        try:
+            dt = datetime.fromisoformat(dt_or_iso)
+        except ValueError:
+            return dt_or_iso
+    else:
+        dt = dt_or_iso
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
+    # %#d / %#I are the Windows equivalents of %-d / %-I (no leading zero).
+    return dt.strftime("%a %b %#d, %#I:%M %p")
 
 
 class HistoryWindow(QWidget):
@@ -30,6 +53,7 @@ class HistoryWindow(QWidget):
     ) -> None:
         super().__init__(None)
         self.setWindowTitle("RL Tracker — Match history")
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.resize(720, 520)
         self._store = store
         self._on_set_platform_id = on_set_platform_id
@@ -63,13 +87,13 @@ class HistoryWindow(QWidget):
         self._tabs = QTabWidget()
         layout.addWidget(self._tabs, 1)
 
-        # Tab 1: teammate breakdown.
-        self._teammate_table = QTableWidget(0, 5)
+        # Tab 1: teammate breakdown (per session).
+        self._teammate_table = QTableWidget(0, 6)
         self._teammate_table.setHorizontalHeaderLabels(
-            ["Teammates", "Playlist", "W", "L", "Win %"]
+            ["Session", "Teammates", "Playlist", "W", "L", "Win %"]
         )
         self._teammate_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
+            1, QHeaderView.ResizeMode.Stretch
         )
         self._teammate_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._tabs.addTab(self._teammate_table, "By teammate")
@@ -159,17 +183,27 @@ class HistoryWindow(QWidget):
         if playlist:
             recent = [r for r in recent if r["playlist"] == playlist]
 
-        # Teammate breakdown.
-        breakdown = self._store.teammate_breakdown(my_id, playlist)
+        # Teammate breakdown (per session).
+        breakdown = self._store.teammate_breakdown(
+            my_id, playlist, gap_minutes=load_session_gap_minutes()
+        )
         self._teammate_table.setRowCount(len(breakdown))
         for row, agg in enumerate(breakdown):
             label = ", ".join(agg.teammate_names) if agg.teammate_names else "(solo)"
             played = agg.wins + agg.losses
             pct = f"{(agg.wins / played * 100):.0f}%" if played else "—"
-            cells = [label, agg.playlist, str(agg.wins), str(agg.losses), pct]
+            session_label = _format_local(agg.session_started_at)
+            cells = [
+                session_label,
+                label,
+                agg.playlist,
+                str(agg.wins),
+                str(agg.losses),
+                pct,
+            ]
             for col, txt in enumerate(cells):
                 item = QTableWidgetItem(txt)
-                if col >= 2:
+                if col >= 3:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._teammate_table.setItem(row, col, item)
 
@@ -183,7 +217,13 @@ class HistoryWindow(QWidget):
                 ("[me] " if p["is_me"] else "") + f"{p['name']} (T{p['team']})"
                 for p in r["players"]
             )
-            cells = [r["ended_at"], r["playlist"], result, my_team, roster]
+            cells = [
+                _format_local(r["ended_at"]),
+                r["playlist"],
+                result,
+                my_team,
+                roster,
+            ]
             for col, txt in enumerate(cells):
                 item = QTableWidgetItem(txt)
                 if col == 2:

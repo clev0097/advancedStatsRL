@@ -10,6 +10,8 @@ PACKET_SEND_RATE = 30
 RECONNECT_BACKOFF_START_S = 1.0
 RECONNECT_BACKOFF_MAX_S = 5.0
 
+SESSION_GAP_MINUTES = 60
+
 
 def user_documents() -> Path:
     return Path(os.path.expandvars(r"%USERPROFILE%\Documents"))
@@ -57,3 +59,16 @@ def save_my_platform_id(platform_id: str) -> None:
         data = {}
     data["my_platform_id"] = platform_id
     settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def load_session_gap_minutes() -> int:
+    import json
+
+    try:
+        data = json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return SESSION_GAP_MINUTES
+    val = data.get("session_gap_minutes")
+    if isinstance(val, int) and val > 0:
+        return val
+    return SESSION_GAP_MINUTES

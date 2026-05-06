@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -35,6 +35,8 @@ class TeammateAggregate:
     wins: int
     losses: int
     unknown: int  # matches where won is None
+    session_started_at: datetime | None = None
+    session_ended_at: datetime | None = None
 
     @property
     def total(self) -> int:
@@ -114,21 +116,27 @@ class HistoryStore:
         return True
 
     def teammate_breakdown(
-        self, my_platform_id: str | None, playlist: str | None = None
+        self,
+        my_platform_id: str | None,
+        playlist: str | None = None,
+        gap_minutes: int = 60,
     ) -> list[TeammateAggregate]:
-        """Group matches by exact teammate set (excluding self). Requires MY_PLATFORM_ID
-        to identify self; without it, returns []."""
+        """Group matches by (session, exact teammate set). Sessions are derived
+        from gaps between consecutive ``ended_at`` values exceeding
+        ``gap_minutes``. Requires MY_PLATFORM_ID to identify self; without it,
+        returns []."""
         if not my_platform_id:
             return []
 
         sql = (
-            "SELECT m.id, m.playlist, m.won FROM matches m "
+            "SELECT m.id, m.playlist, m.won, m.ended_at FROM matches m "
             "JOIN match_players mp ON mp.match_id = m.id AND mp.platform_id = ? "
         )
         params: list[object] = [my_platform_id]
         if playlist:
             sql += "WHERE m.playlist = ? "
             params.append(playlist)
+        sql += "ORDER BY m.ended_at ASC"
 
         cur = self._conn.cursor()
         cur.execute(sql, params)
@@ -136,9 +144,24 @@ class HistoryStore:
         if not my_matches:
             return []
 
+        gap = timedelta(minutes=gap_minutes)
+        session_idx = -1
+        prev_end: datetime | None = None
+        session_bounds: dict[int, list[datetime]] = {}  # idx -> [start, end]
+        match_session: dict[int, int] = {}
+        for match_id, _pl, _won, ended_at_str in my_matches:
+            ended_at = datetime.fromisoformat(ended_at_str)
+            if prev_end is None or (ended_at - prev_end) > gap:
+                session_idx += 1
+                session_bounds[session_idx] = [ended_at, ended_at]
+            else:
+                session_bounds[session_idx][1] = ended_at
+            match_session[match_id] = session_idx
+            prev_end = ended_at
+
         # For each match, fetch teammates (same team, excluding self).
-        groups: dict[tuple[tuple[str, ...], str], dict] = {}
-        for match_id, m_playlist, won in my_matches:
+        groups: dict[tuple[int, tuple[str, ...], str], dict] = {}
+        for match_id, m_playlist, won, _ended_at in my_matches:
             cur.execute(
                 "SELECT mp2.platform_id, mp2.name FROM match_players mp1 "
                 "JOIN match_players mp2 ON mp1.match_id = mp2.match_id AND mp1.team = mp2.team "
@@ -148,7 +171,8 @@ class HistoryStore:
             tm = sorted(cur.fetchall(), key=lambda r: r[0])
             tm_ids = tuple(r[0] for r in tm)
             tm_names = tuple(r[1] for r in tm)
-            key = (tm_ids, m_playlist)
+            sidx = match_session[match_id]
+            key = (sidx, tm_ids, m_playlist)
             agg = groups.setdefault(
                 key, {"names": tm_names, "wins": 0, "losses": 0, "unknown": 0}
             )
@@ -160,7 +184,8 @@ class HistoryStore:
                 agg["losses"] += 1
 
         out: list[TeammateAggregate] = []
-        for (tm_ids, pl), agg in groups.items():
+        for (sidx, tm_ids, pl), agg in groups.items():
+            start, end = session_bounds[sidx]
             out.append(
                 TeammateAggregate(
                     teammates=tm_ids,
@@ -169,9 +194,19 @@ class HistoryStore:
                     wins=agg["wins"],
                     losses=agg["losses"],
                     unknown=agg["unknown"],
+                    session_started_at=start,
+                    session_ended_at=end,
                 )
             )
-        out.sort(key=lambda a: (-a.total, a.playlist, a.teammate_names))
+        # Newest session first; within a session, biggest groups first.
+        out.sort(
+            key=lambda a: (
+                -(a.session_started_at.timestamp() if a.session_started_at else 0),
+                -a.total,
+                a.playlist,
+                a.teammate_names,
+            )
+        )
         return out
 
     def recent(self, limit: int = 50) -> list[dict]:
