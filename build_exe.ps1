@@ -12,7 +12,7 @@ python -m PyInstaller `
     --windowed `
     --name RLTracker `
     --collect-submodules rl_tracker `
-    rl_tracker/__main__.py
+    run_rl_tracker.py
 
 Write-Host ""
 Write-Host "Built: dist\RLTracker.exe" -ForegroundColor Green
