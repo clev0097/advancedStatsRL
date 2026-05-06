@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from .config import history_db_path, load_my_platform_id
+from .history import HistoryStore
 from .ini_helper import ensure_stats_api_enabled
 from .session import SessionState
 from .stats_client import StatsClient
@@ -43,10 +45,14 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
 
-    session = SessionState()
+    db_path = history_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    history = HistoryStore(db_path)
+
+    session = SessionState(history=history, my_platform_id=load_my_platform_id())
     client = StatsClient(dump_path=args.dump_events)
 
-    overlay = Overlay(session, client)
+    overlay = Overlay(session, client, history)
     client._on_status = overlay.set_status  # bind status updates to the overlay
     client.start()
     overlay.show()
