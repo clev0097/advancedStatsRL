@@ -8,7 +8,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pyinstaller>=6"]
 
 [project.scripts]
 rl-tracker = "rl_tracker.__main__:main"
