@@ -162,7 +162,12 @@ class Overlay(QWidget):
         if self._history_window is None:
             from .history_window import HistoryWindow
 
-            self._history_window = HistoryWindow(self._history)
+            def on_set_platform_id(pid: str) -> None:
+                self._session.my_platform_id = pid
+
+            self._history_window = HistoryWindow(
+                self._history, on_set_platform_id=on_set_platform_id
+            )
         self._history_window.show()
         self._history_window.raise_()
         self._history_window.activateWindow()

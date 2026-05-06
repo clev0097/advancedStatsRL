@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -15,25 +18,34 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .config import load_my_platform_id, save_my_platform_id, settings_file
+from .config import load_my_platform_id, save_my_platform_id
 from .history import HistoryStore
 
 
 class HistoryWindow(QWidget):
-    def __init__(self, store: HistoryStore) -> None:
+    def __init__(
+        self,
+        store: HistoryStore,
+        on_set_platform_id: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(None)
         self.setWindowTitle("RL Tracker — Match history")
         self.resize(720, 520)
         self._store = store
+        self._on_set_platform_id = on_set_platform_id
 
         layout = QVBoxLayout(self)
 
-        # Banner: prompt for platform ID if missing.
-        self._banner = QLabel()
-        self._banner.setWordWrap(True)
+        # Banner area: prompt for platform ID if missing. Replaced dynamically
+        # with player-picker buttons when matches exist but ID isn't set.
+        self._banner = QFrame()
         self._banner.setStyleSheet(
-            "background:#553; color:#ffd; padding:6px; border-radius:4px;"
+            "QFrame { background:#553; color:#ffd; border-radius:4px; } "
+            "QLabel { color:#ffd; } "
+            "QPushButton { padding:4px 10px; }"
         )
+        self._banner_layout = QVBoxLayout(self._banner)
+        self._banner_layout.setContentsMargins(8, 6, 8, 6)
         layout.addWidget(self._banner)
 
         # Filters row.
@@ -94,19 +106,54 @@ class HistoryWindow(QWidget):
             self._playlist_filter.setCurrentIndex(idx)
         self._playlist_filter.blockSignals(False)
 
+    def _clear_banner(self) -> None:
+        while self._banner_layout.count():
+            item = self._banner_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _show_picker_banner(self, latest_players: list[dict]) -> None:
+        self._clear_banner()
+        self._banner_layout.addWidget(
+            QLabel("Which one of these is you? (click once — saved for next time)")
+        )
+        row = QHBoxLayout()
+        for p in latest_players:
+            btn = QPushButton(f"{p['name']}  ({p['platform_id'].split('|')[0]})")
+            pid = p["platform_id"]
+            btn.clicked.connect(lambda _checked=False, x=pid: self._pick_self(x))
+            row.addWidget(btn)
+        row.addStretch(1)
+        self._banner_layout.addLayout(row)
+        self._banner.show()
+
+    def _show_no_matches_banner(self) -> None:
+        self._clear_banner()
+        self._banner_layout.addWidget(
+            QLabel(
+                "Play one match — afterward you'll be able to pick which player is "
+                "you, and your W/L history will be attributed automatically."
+            )
+        )
+        self._banner.show()
+
+    def _pick_self(self, platform_id: str) -> None:
+        save_my_platform_id(platform_id)
+        if self._on_set_platform_id is not None:
+            self._on_set_platform_id(platform_id)
+        self._refresh()
+
     def _refresh(self) -> None:
         my_id = load_my_platform_id()
+        recent = self._store.recent(limit=200)
         if not my_id:
-            self._banner.setText(
-                f"MY_PLATFORM_ID is not set. Edit {settings_file()} and add "
-                f'\'"my_platform_id": "Steam|76561198…|0"\' (find your PrimaryId in '
-                "events.log). Until then, matches are recorded but not attributed to you."
-            )
-            self._banner.show()
+            if recent:
+                self._show_picker_banner(recent[0]["players"])
+            else:
+                self._show_no_matches_banner()
         else:
             self._banner.hide()
-
-        recent = self._store.recent(limit=200)
         self._update_playlist_options(recent)
         playlist = self._current_playlist()
         if playlist:
