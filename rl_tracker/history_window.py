@@ -25,6 +25,7 @@ from .config import (
     load_session_gap_minutes,
     save_my_platform_id,
 )
+from .advanced_history_tab import AdvancedHistoryTab
 from .history import HistoryStore
 
 
@@ -108,6 +109,10 @@ class HistoryWindow(QWidget):
         )
         self._recent_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._tabs.addTab(self._recent_table, "Recent matches")
+
+        # Tab 3: advanced filterable view.
+        self._advanced_tab = AdvancedHistoryTab(store)
+        self._tabs.addTab(self._advanced_tab, "Advanced")
 
         self._refresh()
 
@@ -243,3 +248,4 @@ class HistoryWindow(QWidget):
     # Public hook so the overlay can ping us when a new match is recorded.
     def notify_new_match(self) -> None:
         self._refresh()
+        self._advanced_tab.refresh_dataset()

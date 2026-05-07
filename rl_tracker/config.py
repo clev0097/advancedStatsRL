@@ -61,6 +61,29 @@ def save_my_platform_id(platform_id: str) -> None:
     settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def load_advanced_view() -> dict:
+    import json
+
+    try:
+        data = json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    val = data.get("advanced_view")
+    return val if isinstance(val, dict) else {}
+
+
+def save_advanced_view(view: dict) -> None:
+    import json
+
+    settings_file().parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data["advanced_view"] = view
+    settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def load_session_gap_minutes() -> int:
     import json
 

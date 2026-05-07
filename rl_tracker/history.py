@@ -74,6 +74,24 @@ CREATE INDEX IF NOT EXISTS idx_match_players_platform ON match_players(platform_
 """
 
 
+def assign_sessions(
+    ended_ats: list[datetime], gap_minutes: int
+) -> list[int]:
+    """Given a chronologically-ascending list of end times, return per-item
+    session indices. A new session begins when the gap to the previous match
+    exceeds ``gap_minutes``."""
+    gap = timedelta(minutes=gap_minutes)
+    out: list[int] = []
+    idx = -1
+    prev: datetime | None = None
+    for ended_at in ended_ats:
+        if prev is None or (ended_at - prev) > gap:
+            idx += 1
+        out.append(idx)
+        prev = ended_at
+    return out
+
+
 class HistoryStore:
     """Persistent SQLite store for completed matches and rosters."""
 
@@ -231,20 +249,31 @@ class HistoryStore:
         )
         return out
 
+    def all_matches(self) -> list[dict]:
+        return self._fetch_matches(limit=None)
+
     def recent(self, limit: int = 50) -> list[dict]:
+        return self._fetch_matches(limit=limit)
+
+    def _fetch_matches(self, limit: int | None) -> list[dict]:
         cur = self._conn.cursor()
-        cur.execute(
-            "SELECT id, match_guid, playlist, ended_at, won, my_team, winner_team, "
+        sql = (
+            "SELECT id, match_guid, playlist, started_at, ended_at, won, my_team, winner_team, "
             "team0_score, team1_score, overtime "
-            "FROM matches ORDER BY ended_at DESC LIMIT ?",
-            (limit,),
+            "FROM matches ORDER BY ended_at DESC"
         )
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        cur.execute(sql, params)
         rows = cur.fetchall()
         out: list[dict] = []
         for (
             mid,
             guid,
             playlist,
+            started_at,
             ended_at,
             won,
             my_team,
@@ -265,6 +294,7 @@ class HistoryStore:
                 {
                     "match_guid": guid,
                     "playlist": playlist,
+                    "started_at": started_at,
                     "ended_at": ended_at,
                     "won": None if won is None else bool(won),
                     "my_team": my_team,
