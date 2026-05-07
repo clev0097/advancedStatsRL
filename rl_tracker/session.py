@@ -43,6 +43,10 @@ class _RosterSnapshot:
     # left before MatchEnded and weren't replaced, so e.g. a teammate who
     # ragequits still appears in the recorded match.
     initial_players: list[dict] = field(default_factory=list)
+    team0_score: int = 0
+    team1_score: int = 0
+    # Sticky: once true, stays true even if a later frame flips it back.
+    overtime: bool = False
 
 
 @dataclass
@@ -133,6 +137,28 @@ class SessionState:
                 max(snap.max_team_sizes[1], sizes[1]),
             )
 
+        snap = self._rosters[guid]
+        game = self._get(data, "Game", "game")
+        if isinstance(game, dict):
+            teams = self._get(game, "Teams", "teams")
+            if isinstance(teams, list):
+                for t in teams:
+                    if not isinstance(t, dict):
+                        continue
+                    team_num = self._get(t, "TeamNum", "team_num")
+                    score = self._get(t, "Score", "score")
+                    try:
+                        team_num_i = int(team_num)
+                        score_i = int(score)
+                    except (TypeError, ValueError):
+                        continue
+                    if team_num_i == 0:
+                        snap.team0_score = score_i
+                    elif team_num_i == 1:
+                        snap.team1_score = score_i
+            if bool(self._get(game, "bOvertime", "b_overtime", default=False)):
+                snap.overtime = True
+
     def _on_match_ended(self, data: dict[str, Any]) -> None:
         guid = str(self._get(data, "MatchGuid", "match_guid", "guid", default=""))
         if not guid or guid in self._recorded:
@@ -203,6 +229,9 @@ class SessionState:
             my_team=my_team,
             winner_team=winner_team_int,
             players=player_records,
+            team0_score=snap.team0_score,
+            team1_score=snap.team1_score,
+            overtime=snap.overtime,
         )
 
         # Update session tally.

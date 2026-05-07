@@ -11,17 +11,29 @@ OPP1 = "XboxOne|2535418161062515|0"
 OPP2 = "Unknown|0|0"
 
 
-def update_state(guid: str, players: list[tuple[str, str, int]]) -> dict:
-    return {
-        "Event": "UpdateState",
-        "Data": {
-            "MatchGuid": guid,
-            "Players": [
-                {"PrimaryId": pid, "Name": name, "TeamNum": team}
-                for pid, name, team in players
-            ],
-        },
+def update_state(
+    guid: str,
+    players: list[tuple[str, str, int]],
+    team_scores: tuple[int, int] | None = None,
+    overtime: bool = False,
+) -> dict:
+    data: dict = {
+        "MatchGuid": guid,
+        "Players": [
+            {"PrimaryId": pid, "Name": name, "TeamNum": team}
+            for pid, name, team in players
+        ],
     }
+    if team_scores is not None or overtime:
+        t0, t1 = team_scores if team_scores is not None else (0, 0)
+        data["Game"] = {
+            "Teams": [
+                {"TeamNum": 0, "Score": t0},
+                {"TeamNum": 1, "Score": t1},
+            ],
+            "bOvertime": overtime,
+        }
+    return {"Event": "UpdateState", "Data": data}
 
 
 def match_ended(guid: str, winner_team: int) -> dict:
@@ -239,3 +251,70 @@ def test_reset_clears_session_but_not_history(store: HistoryStore):
     s.reset()
     assert s.by_playlist == {}
     assert len(store.recent()) == 1  # persistence survives session reset
+
+
+def test_team_scores_and_overtime_recorded(store: HistoryStore):
+    s = SessionState(history=store, my_platform_id=ME)
+    roster = [(ME, "Me", 0), (MATE, "F", 0), (OPP1, "X", 1), (OPP2, "Y", 1)]
+    s.apply(update_state("g1", roster, team_scores=(1, 1)))
+    # OT flag flips to true mid-match, then a later frame happens to omit it.
+    s.apply(update_state("g1", roster, team_scores=(2, 2), overtime=True))
+    s.apply(update_state("g1", roster, team_scores=(3, 2), overtime=False))
+    s.apply(match_ended("g1", winner_team=0))
+
+    r = store.recent()[0]
+    assert r["team0_score"] == 3
+    assert r["team1_score"] == 2
+    assert r["overtime"] is True  # sticky once set
+
+
+def test_match_without_game_payload_defaults_zero(store: HistoryStore):
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (MATE, "F", 0), (OPP1, "X", 1), (OPP2, "Y", 1)]))
+    s.apply(match_ended("g1", winner_team=0))
+    r = store.recent()[0]
+    assert r["team0_score"] == 0
+    assert r["team1_score"] == 0
+    assert r["overtime"] is False
+
+
+def test_history_store_migrates_legacy_schema(tmp_path):
+    import sqlite3
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE matches (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_guid    TEXT NOT NULL UNIQUE,
+            playlist      TEXT NOT NULL,
+            started_at    TEXT NOT NULL,
+            ended_at      TEXT NOT NULL,
+            won           INTEGER,
+            my_team       INTEGER,
+            winner_team   INTEGER
+        );
+        CREATE TABLE match_players (
+            match_id     INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+            platform_id  TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            team         INTEGER NOT NULL,
+            is_me        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (match_id, platform_id)
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO matches (match_guid, playlist, started_at, ended_at, won, my_team, winner_team) "
+        "VALUES ('old', 'doubles', '2024-01-01T00:00:00+00:00', '2024-01-01T00:05:00+00:00', 1, 0, 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    store2 = HistoryStore(str(db))
+    r = store2.recent()
+    assert len(r) == 1
+    assert r[0]["team0_score"] == 0
+    assert r[0]["team1_score"] == 0
+    assert r[0]["overtime"] is False
+    store2.close()

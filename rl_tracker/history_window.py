@@ -99,12 +99,12 @@ class HistoryWindow(QWidget):
         self._tabs.addTab(self._teammate_table, "By teammate")
 
         # Tab 2: recent matches.
-        self._recent_table = QTableWidget(0, 5)
+        self._recent_table = QTableWidget(0, 6)
         self._recent_table.setHorizontalHeaderLabels(
-            ["Ended", "Playlist", "Result", "My team", "Players"]
+            ["Ended", "Playlist", "Result", "Score", "My team", "Players"]
         )
         self._recent_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.Stretch
+            5, QHeaderView.ResizeMode.Stretch
         )
         self._recent_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._tabs.addTab(self._recent_table, "Recent matches")
@@ -213,6 +213,15 @@ class HistoryWindow(QWidget):
             won = r["won"]
             result = "—" if won is None else ("W" if won else "L")
             my_team = "?" if r["my_team"] is None else str(r["my_team"])
+            t0, t1 = r.get("team0_score", 0), r.get("team1_score", 0)
+            if r["my_team"] == 0:
+                score = f"{t0}–{t1}"
+            elif r["my_team"] == 1:
+                score = f"{t1}–{t0}"
+            else:
+                score = f"{t0}–{t1}"
+            if r.get("overtime"):
+                score += " (OT)"
             roster = ", ".join(
                 ("[me] " if p["is_me"] else "") + f"{p['name']} (T{p['team']})"
                 for p in r["players"]
@@ -221,12 +230,13 @@ class HistoryWindow(QWidget):
                 _format_local(r["ended_at"]),
                 r["playlist"],
                 result,
+                score,
                 my_team,
                 roster,
             ]
             for col, txt in enumerate(cells):
                 item = QTableWidgetItem(txt)
-                if col == 2:
+                if col in (2, 3):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._recent_table.setItem(row, col, item)
 

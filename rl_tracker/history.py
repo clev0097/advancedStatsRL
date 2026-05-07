@@ -25,6 +25,9 @@ class MatchRecord:
     my_team: int | None
     winner_team: int | None
     players: list[PlayerRecord] = field(default_factory=list)
+    team0_score: int = 0
+    team1_score: int = 0
+    overtime: bool = False
 
 
 @dataclass
@@ -52,7 +55,10 @@ CREATE TABLE IF NOT EXISTS matches (
     ended_at      TEXT NOT NULL,
     won           INTEGER,
     my_team       INTEGER,
-    winner_team   INTEGER
+    winner_team   INTEGER,
+    team0_score   INTEGER NOT NULL DEFAULT 0,
+    team1_score   INTEGER NOT NULL DEFAULT 0,
+    overtime      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS match_players (
@@ -76,7 +82,20 @@ class HistoryStore:
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute("PRAGMA table_info(matches)")
+        existing = {row[1] for row in cur.fetchall()}
+        for col, ddl in (
+            ("team0_score", "INTEGER NOT NULL DEFAULT 0"),
+            ("team1_score", "INTEGER NOT NULL DEFAULT 0"),
+            ("overtime", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in existing:
+                cur.execute(f"ALTER TABLE matches ADD COLUMN {col} {ddl}")
 
     def close(self) -> None:
         try:
@@ -89,8 +108,8 @@ class HistoryStore:
         cur = self._conn.cursor()
         try:
             cur.execute(
-                "INSERT INTO matches (match_guid, playlist, started_at, ended_at, won, my_team, winner_team) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO matches (match_guid, playlist, started_at, ended_at, won, my_team, winner_team, team0_score, team1_score, overtime) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     match.match_guid,
                     match.playlist,
@@ -99,6 +118,9 @@ class HistoryStore:
                     None if match.won is None else int(match.won),
                     match.my_team,
                     match.winner_team,
+                    int(match.team0_score),
+                    int(match.team1_score),
+                    int(match.overtime),
                 ),
             )
         except sqlite3.IntegrityError:
@@ -212,13 +234,25 @@ class HistoryStore:
     def recent(self, limit: int = 50) -> list[dict]:
         cur = self._conn.cursor()
         cur.execute(
-            "SELECT id, match_guid, playlist, ended_at, won, my_team, winner_team "
+            "SELECT id, match_guid, playlist, ended_at, won, my_team, winner_team, "
+            "team0_score, team1_score, overtime "
             "FROM matches ORDER BY ended_at DESC LIMIT ?",
             (limit,),
         )
         rows = cur.fetchall()
         out: list[dict] = []
-        for mid, guid, playlist, ended_at, won, my_team, winner_team in rows:
+        for (
+            mid,
+            guid,
+            playlist,
+            ended_at,
+            won,
+            my_team,
+            winner_team,
+            team0_score,
+            team1_score,
+            overtime,
+        ) in rows:
             cur.execute(
                 "SELECT platform_id, name, team, is_me FROM match_players WHERE match_id = ?",
                 (mid,),
@@ -235,6 +269,9 @@ class HistoryStore:
                     "won": None if won is None else bool(won),
                     "my_team": my_team,
                     "winner_team": winner_team,
+                    "team0_score": int(team0_score),
+                    "team1_score": int(team1_score),
+                    "overtime": bool(overtime),
                     "players": players,
                 }
             )
