@@ -112,6 +112,20 @@ def test_roster_snapshot_reflects_latest_update(store: HistoryStore):
     assert OPP2 not in pids
 
 
+def test_duel_ragequit_still_recorded_as_duels(store: HistoryStore):
+    """Opponent leaves before MatchEnded; playlist must stay 'duels', not '1v0'."""
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    # Opponent quits; only self remains in the final UpdateState.
+    s.apply(update_state("g1", [(ME, "Me", 0)]))
+    s.apply(match_ended("g1", winner_team=0))
+
+    assert "duels" in s.by_playlist
+    assert "1v0" not in s.by_playlist
+    assert s.by_playlist["duels"].wins == 1
+    assert store.recent()[0]["playlist"] == "duels"
+
+
 def test_teammate_breakdown_groups_by_exact_set(store: HistoryStore):
     s = SessionState(history=store, my_platform_id=ME)
     # 2v2 with Friend: win
@@ -135,6 +149,57 @@ def test_teammate_breakdown_groups_by_exact_set(store: HistoryStore):
     triple_key = (tuple(sorted([MATE, other])), "standard")
     assert by_key[triple_key].wins == 1
     assert by_key[triple_key].losses == 0
+
+
+def test_streak_increments_on_consecutive_wins(store: HistoryStore):
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g1", winner_team=0))
+    s.apply(update_state("g2", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g2", winner_team=0))
+    assert s.streak_kind == "W"
+    assert s.streak_count == 2
+
+
+def test_streak_resets_on_loss_after_win(store: HistoryStore):
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g1", winner_team=0))
+    s.apply(update_state("g2", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g2", winner_team=1))
+    assert s.streak_kind == "L"
+    assert s.streak_count == 1
+
+
+def test_streak_flips_on_win_after_loss(store: HistoryStore):
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g1", winner_team=1))
+    s.apply(update_state("g2", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g2", winner_team=0))
+    assert s.streak_kind == "W"
+    assert s.streak_count == 1
+
+
+def test_streak_unchanged_when_result_unknown(store: HistoryStore):
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g1", winner_team=0))
+    # Second match without my_platform_id means won is None.
+    s.my_platform_id = None
+    s.apply(update_state("g2", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g2", winner_team=1))
+    assert s.streak_kind == "W"
+    assert s.streak_count == 1
+
+
+def test_reset_clears_streak(store: HistoryStore):
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g1", winner_team=0))
+    s.reset()
+    assert s.streak_kind is None
+    assert s.streak_count == 0
 
 
 def test_reset_clears_session_but_not_history(store: HistoryStore):

@@ -94,7 +94,10 @@ class Overlay(QWidget):
         p.setFont(QFont("Consolas", 10))
 
         totals = self._session.totals()
-        lines = [f"Session  W {totals.wins}  L {totals.losses}   [{self._status}]"]
+        streak = ""
+        if self._session.streak_kind and self._session.streak_count:
+            streak = f"  Streak {self._session.streak_kind}{self._session.streak_count}"
+        lines = [f"Session  W {totals.wins}  L {totals.losses}{streak}   [{self._status}]"]
         if self._session.by_playlist:
             for name, t in sorted(self._session.by_playlist.items()):
                 lines.append(f"  {name:<14} {t.wins}-{t.losses}")

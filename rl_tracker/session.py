@@ -36,6 +36,9 @@ class PlaylistTally:
 class _RosterSnapshot:
     started_at: datetime
     players: list[dict]  # raw roster entries (Name, PrimaryId, TeamNum)
+    # Largest team sizes ever seen during the match. Used to derive the
+    # playlist label so a mid-match ragequit doesn't downgrade 1v1 -> 1v0.
+    max_team_sizes: tuple[int, int] = (0, 0)
 
 
 @dataclass
@@ -45,6 +48,8 @@ class SessionState:
     my_platform_id: str | None = None
     history: HistoryStore | None = None
     on_match_recorded: Callable[[MatchRecord], None] | None = None
+    streak_count: int = 0
+    streak_kind: str | None = None  # "W", "L", or None
 
     # match_guid -> latest roster snapshot
     _rosters: dict[str, _RosterSnapshot] = field(default_factory=dict, repr=False)
@@ -56,6 +61,8 @@ class SessionState:
         self.by_playlist.clear()
         self._rosters.clear()
         self._recorded.clear()
+        self.streak_count = 0
+        self.streak_kind = None
 
     def totals(self) -> PlaylistTally:
         out = PlaylistTally()
@@ -103,11 +110,21 @@ class SessionState:
             players.append({"PrimaryId": str(pid), "Name": str(name), "TeamNum": int(team)})
         if not players:
             return
+        sizes = (
+            sum(1 for p in players if p["TeamNum"] == 0),
+            sum(1 for p in players if p["TeamNum"] == 1),
+        )
         snap = self._rosters.get(guid)
         if snap is None:
-            self._rosters[guid] = _RosterSnapshot(started_at=_now(), players=players)
+            self._rosters[guid] = _RosterSnapshot(
+                started_at=_now(), players=players, max_team_sizes=sizes
+            )
         else:
             snap.players = players
+            snap.max_team_sizes = (
+                max(snap.max_team_sizes[0], sizes[0]),
+                max(snap.max_team_sizes[1], sizes[1]),
+            )
 
     def _on_match_ended(self, data: dict[str, Any]) -> None:
         guid = str(self._get(data, "MatchGuid", "match_guid", "guid", default=""))
@@ -139,11 +156,9 @@ class SessionState:
                 )
             )
 
-        # Derive playlist from roster sizes.
-        team_sizes = (
-            sum(1 for p in snap.players if p["TeamNum"] == 0),
-            sum(1 for p in snap.players if p["TeamNum"] == 1),
-        )
+        # Derive playlist from the largest roster seen during the match so
+        # that a mid-match ragequit doesn't reclassify e.g. duels as 1v0.
+        team_sizes = snap.max_team_sizes
         playlist = _PLAYLIST_BY_SIZE.get(team_sizes, f"{team_sizes[0]}v{team_sizes[1]}")
 
         won: bool | None
@@ -169,8 +184,18 @@ class SessionState:
         tally.last_match_at = ended_at
         if won is True:
             tally.wins += 1
+            if self.streak_kind == "W":
+                self.streak_count += 1
+            else:
+                self.streak_kind = "W"
+                self.streak_count = 1
         elif won is False:
             tally.losses += 1
+            if self.streak_kind == "L":
+                self.streak_count += 1
+            else:
+                self.streak_kind = "L"
+                self.streak_count = 1
 
         self._recorded.add(guid)
         self._rosters.pop(guid, None)
