@@ -39,6 +39,10 @@ class _RosterSnapshot:
     # Largest team sizes ever seen during the match. Used to derive the
     # playlist label so a mid-match ragequit doesn't downgrade 1v1 -> 1v0.
     max_team_sizes: tuple[int, int] = (0, 0)
+    # Roster captured on the first UpdateState. Used to backfill players who
+    # left before MatchEnded and weren't replaced, so e.g. a teammate who
+    # ragequits still appears in the recorded match.
+    initial_players: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -117,7 +121,10 @@ class SessionState:
         snap = self._rosters.get(guid)
         if snap is None:
             self._rosters[guid] = _RosterSnapshot(
-                started_at=_now(), players=players, max_team_sizes=sizes
+                started_at=_now(),
+                players=players,
+                max_team_sizes=sizes,
+                initial_players=list(players),
             )
         else:
             snap.players = players
@@ -140,10 +147,29 @@ class SessionState:
         if snap is None:
             return  # No roster captured; can't attribute teammates.
 
+        # Backfill players who were in the initial roster but left before the
+        # match ended and weren't replaced. If a slot was filled by a late
+        # joiner the final roster meets the max team size and nothing is added.
+        roster: list[dict] = list(snap.players)
+        present_ids = {p["PrimaryId"] for p in roster}
+        for team in (0, 1):
+            current = sum(1 for p in roster if p["TeamNum"] == team)
+            gap = snap.max_team_sizes[team] - current
+            if gap <= 0:
+                continue
+            for p in snap.initial_players:
+                if gap <= 0:
+                    break
+                if p["TeamNum"] != team or p["PrimaryId"] in present_ids:
+                    continue
+                roster.append(p)
+                present_ids.add(p["PrimaryId"])
+                gap -= 1
+
         # Identify self (if MY_PLATFORM_ID is configured and matches a roster entry).
         my_team: int | None = None
         player_records: list[PlayerRecord] = []
-        for p in snap.players:
+        for p in roster:
             is_me = bool(self.my_platform_id) and p["PrimaryId"] == self.my_platform_id
             if is_me:
                 my_team = p["TeamNum"]

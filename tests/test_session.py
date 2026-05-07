@@ -112,6 +112,36 @@ def test_roster_snapshot_reflects_latest_update(store: HistoryStore):
     assert OPP2 not in pids
 
 
+def test_teammate_ragequit_falls_back_to_initial_roster(store: HistoryStore):
+    """Teammate leaves before MatchEnded with no replacement; original teammate is still recorded."""
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (MATE, "Friend", 0), (OPP1, "X", 1), (OPP2, "Y", 1)]))
+    # Teammate quits; opponent OPP2 also drops.
+    s.apply(update_state("g1", [(ME, "Me", 0), (OPP1, "X", 1)]))
+    s.apply(match_ended("g1", winner_team=1))
+
+    recent = store.recent()
+    assert recent[0]["playlist"] == "doubles"
+    pids = {p["platform_id"] for p in recent[0]["players"]}
+    assert MATE in pids  # teammate from initial roster preserved
+    assert OPP2 in pids  # opponent from initial roster preserved
+    assert OPP1 in pids
+
+
+def test_late_join_replacement_overrides_initial(store: HistoryStore):
+    """A replacement filling the slot wins over the initial roster fallback."""
+    s = SessionState(history=store, my_platform_id=ME)
+    s.apply(update_state("g1", [(ME, "Me", 0), (MATE, "Friend", 0), (OPP1, "X", 1), (OPP2, "Y", 1)]))
+    # MATE leaves and is replaced by a new teammate.
+    new_mate = "Steam|777|0"
+    s.apply(update_state("g1", [(ME, "Me", 0), (new_mate, "NewMate", 0), (OPP1, "X", 1), (OPP2, "Y", 1)]))
+    s.apply(match_ended("g1", winner_team=0))
+
+    pids = {p["platform_id"] for p in store.recent()[0]["players"]}
+    assert new_mate in pids
+    assert MATE not in pids  # replaced, so original teammate is dropped
+
+
 def test_duel_ragequit_still_recorded_as_duels(store: HistoryStore):
     """Opponent leaves before MatchEnded; playlist must stay 'duels', not '1v0'."""
     s = SessionState(history=store, my_platform_id=ME)
