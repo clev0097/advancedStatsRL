@@ -71,6 +71,91 @@ CREATE TABLE IF NOT EXISTS match_players (
 );
 
 CREATE INDEX IF NOT EXISTS idx_match_players_platform ON match_players(platform_id);
+
+CREATE TABLE IF NOT EXISTS match_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id        INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    seq             INTEGER NOT NULL,
+    t_seconds       REAL NOT NULL,
+    kind            TEXT NOT NULL,
+    player_name     TEXT,
+    player_team     INTEGER,
+    secondary_name  TEXT,
+    secondary_team  INTEGER,
+    ball_x          REAL,
+    ball_y          REAL,
+    ball_z          REAL,
+    pre_speed       REAL,
+    post_speed      REAL,
+    goal_speed      REAL,
+    goal_time       REAL,
+    impact_force    REAL,
+    extra           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_match_events_match ON match_events(match_id, seq);
+CREATE INDEX IF NOT EXISTS idx_match_events_kind ON match_events(match_id, kind);
+
+CREATE TABLE IF NOT EXISTS match_ticks (
+    match_id        INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    seq             INTEGER NOT NULL,
+    t_seconds       REAL NOT NULL,
+    player_name     TEXT NOT NULL,
+    player_team     INTEGER NOT NULL,
+    boost           REAL,
+    speed           REAL,
+    b_boosting      INTEGER,
+    b_on_ground     INTEGER,
+    ball_speed      REAL,
+    ball_team       INTEGER,
+    PRIMARY KEY (match_id, seq, player_name)
+);
+CREATE INDEX IF NOT EXISTS idx_match_ticks_player ON match_ticks(match_id, player_name);
+
+CREATE TABLE IF NOT EXISTS player_match_stats (
+    match_id              INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    player_name           TEXT NOT NULL,
+    player_team           INTEGER NOT NULL,
+    -- Boost economy
+    boost_avg             REAL,
+    time_zero_boost_pct   REAL,
+    time_full_boost_pct   REAL,
+    boost_starved_pct     REAL,
+    boost_used            REAL,
+    -- Movement
+    avg_speed             REAL,
+    supersonic_pct        REAL,
+    slow_pct              REAL,
+    aerial_pct            REAL,
+    -- Possession / tempo
+    possession_pct_team   REAL,
+    touch_share           REAL,
+    time_in_off_third_pct REAL,
+    -- Touch quality
+    touches               INTEGER,
+    avg_touch_pace_added  REAL,
+    big_hits              INTEGER,
+    fifty_attempts        INTEGER,
+    fifty_wins            INTEGER,
+    avg_touch_y           REAL,
+    -- Shooting / finishing
+    shots                 INTEGER,
+    goals                 INTEGER,
+    assists               INTEGER,
+    avg_shot_speed        REAL,
+    avg_goal_speed        REAL,
+    xg_lite               REAL,
+    crossbars             INTEGER,
+    -- Defense
+    saves                 INTEGER,
+    epic_saves            INTEGER,
+    avg_save_speed        REAL,
+    shots_faced           INTEGER,
+    -- Combat
+    demos_dealt           INTEGER,
+    demos_taken           INTEGER,
+    demo_assists          INTEGER,
+    PRIMARY KEY (match_id, player_name)
+);
 """
 
 
@@ -123,6 +208,10 @@ class HistoryStore:
 
     def record(self, match: MatchRecord) -> bool:
         """Insert a match. Returns False if match_guid already exists (idempotent)."""
+        return self.record_with_id(match) is not None
+
+    def record_with_id(self, match: MatchRecord) -> int | None:
+        """Insert a match and return its rowid, or None if duplicate."""
         cur = self._conn.cursor()
         try:
             cur.execute(
@@ -142,7 +231,7 @@ class HistoryStore:
                 ),
             )
         except sqlite3.IntegrityError:
-            return False
+            return None
         match_id = cur.lastrowid
         cur.executemany(
             "INSERT OR IGNORE INTO match_players (match_id, platform_id, name, team, is_me) "
@@ -153,7 +242,69 @@ class HistoryStore:
             ],
         )
         self._conn.commit()
-        return True
+        return match_id
+
+    def insert_events(self, match_id: int, rows: Iterable[tuple]) -> None:
+        cur = self._conn.cursor()
+        cur.executemany(
+            "INSERT INTO match_events (match_id, seq, t_seconds, kind, "
+            "player_name, player_team, secondary_name, secondary_team, "
+            "ball_x, ball_y, ball_z, pre_speed, post_speed, goal_speed, goal_time, "
+            "impact_force, extra) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(match_id, *r) for r in rows],
+        )
+        self._conn.commit()
+
+    def insert_ticks(self, match_id: int, rows: Iterable[tuple]) -> None:
+        cur = self._conn.cursor()
+        cur.executemany(
+            "INSERT OR IGNORE INTO match_ticks (match_id, seq, t_seconds, "
+            "player_name, player_team, boost, speed, b_boosting, b_on_ground, "
+            "ball_speed, ball_team) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(match_id, *r) for r in rows],
+        )
+        self._conn.commit()
+
+    def upsert_player_stats(self, match_id: int, rows: Iterable[dict]) -> None:
+        cur = self._conn.cursor()
+        cols = [
+            "player_name", "player_team",
+            "boost_avg", "time_zero_boost_pct", "time_full_boost_pct",
+            "boost_starved_pct", "boost_used",
+            "avg_speed", "supersonic_pct", "slow_pct", "aerial_pct",
+            "possession_pct_team", "touch_share", "time_in_off_third_pct",
+            "touches", "avg_touch_pace_added", "big_hits",
+            "fifty_attempts", "fifty_wins", "avg_touch_y",
+            "shots", "goals", "assists", "avg_shot_speed", "avg_goal_speed",
+            "xg_lite", "crossbars",
+            "saves", "epic_saves", "avg_save_speed", "shots_faced",
+            "demos_dealt", "demos_taken", "demo_assists",
+        ]
+        placeholders = ",".join(["?"] * (len(cols) + 1))  # + match_id
+        sql = (
+            f"INSERT OR REPLACE INTO player_match_stats (match_id, {', '.join(cols)}) "
+            f"VALUES ({placeholders})"
+        )
+        cur.executemany(
+            sql,
+            [tuple([match_id] + [r.get(c) for c in cols]) for r in rows],
+        )
+        self._conn.commit()
+
+    def player_stats_for_match(self, match_guid: str) -> list[dict]:
+        cur = self._conn.cursor()
+        cur.execute("SELECT id FROM matches WHERE match_guid = ?", (match_guid,))
+        row = cur.fetchone()
+        if row is None:
+            return []
+        match_id = row[0]
+        cur.execute("SELECT * FROM player_match_stats WHERE match_id = ?", (match_id,))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def connection(self) -> sqlite3.Connection:
+        return self._conn
 
     def teammate_breakdown(
         self,

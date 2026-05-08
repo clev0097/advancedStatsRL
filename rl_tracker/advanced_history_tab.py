@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDateEdit,
+    QDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -389,7 +390,22 @@ class AdvancedHistoryTab(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([360, 760])
 
+        self._table.cellDoubleClicked.connect(self._on_row_double_clicked)
+
         self._load_state()
+
+    def _on_row_double_clicked(self, row: int, _col: int) -> None:
+        item = self._table.item(row, 0)
+        if item is None:
+            return
+        guid = item.data(Qt.ItemDataRole.UserRole)
+        if not guid:
+            return
+        match = next((m for m in self._matches if m["match_guid"] == guid), None)
+        if match is None:
+            return
+        dlg = AdvancedStatsDialog(self._store, match, self)
+        dlg.exec()
 
     # ---------------- panel construction ----------------
     def _build_filters_panel(self, parent: QVBoxLayout) -> None:
@@ -812,6 +828,8 @@ class AdvancedHistoryTab(QWidget):
                 it = QTableWidgetItem(txt)
                 if c_idx in (2, 3, 4, 5):
                     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c_idx == 0:
+                    it.setData(Qt.ItemDataRole.UserRole, m["match_guid"])
                 self._table.setItem(r_idx, c_idx, it)
         # Stretch teammates + opponents columns.
         header = self._table.horizontalHeader()
@@ -894,3 +912,140 @@ class AdvancedHistoryTab(QWidget):
         super().showEvent(event)
         if self._dirty:
             self.refresh_dataset()
+
+
+# --------------------------------------------------------------------------
+# Per-match advanced-stats drill-down
+# --------------------------------------------------------------------------
+_STAT_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
+    # (Group label, [(field, header, format)])
+    ("Boost", [
+        ("boost_avg", "Avg", "0.0"),
+        ("time_zero_boost_pct", "0%", "%"),
+        ("time_full_boost_pct", "100%", "%"),
+        ("boost_starved_pct", "Starved", "%"),
+        ("boost_used", "Used", "0"),
+    ]),
+    ("Movement", [
+        ("avg_speed", "Avg spd", "0.0"),
+        ("supersonic_pct", "SSL", "%"),
+        ("slow_pct", "Slow", "%"),
+        ("aerial_pct", "Aerial", "%"),
+    ]),
+    ("Possession", [
+        ("possession_pct_team", "Team poss", "%"),
+        ("touch_share", "Touch share", "%"),
+        ("time_in_off_third_pct", "Off third", "%"),
+    ]),
+    ("Touch quality", [
+        ("touches", "Touches", "i"),
+        ("avg_touch_pace_added", "Pace+", "+0.0"),
+        ("big_hits", "Big hits", "i"),
+        ("fifty_wins", "50/50 W", "i"),
+        ("fifty_attempts", "50/50 A", "i"),
+        ("avg_touch_y", "Avg Y", "0"),
+    ]),
+    ("Shooting", [
+        ("shots", "Shots", "i"),
+        ("goals", "Goals", "i"),
+        ("assists", "Assists", "i"),
+        ("avg_shot_speed", "Shot spd", "0.0"),
+        ("avg_goal_speed", "Goal spd", "0.0"),
+        ("xg_lite", "xG", "0.00"),
+        ("crossbars", "Posts", "i"),
+    ]),
+    ("Defense", [
+        ("saves", "Saves", "i"),
+        ("epic_saves", "Epic", "i"),
+        ("avg_save_speed", "Save spd", "0.0"),
+        ("shots_faced", "Shots faced", "i"),
+    ]),
+    ("Combat", [
+        ("demos_dealt", "Demos", "i"),
+        ("demos_taken", "Taken", "i"),
+        ("demo_assists", "Demo asst", "i"),
+    ]),
+]
+
+
+def _fmt(value: Any, spec: str) -> str:
+    if value is None:
+        return "—"
+    if spec == "%":
+        return f"{value * 100:.0f}%"
+    if spec == "i":
+        return str(int(value))
+    if spec == "0":
+        return f"{value:.0f}"
+    if spec == "0.0":
+        return f"{value:.1f}"
+    if spec == "0.00":
+        return f"{value:.2f}"
+    if spec == "+0.0":
+        return f"{value:+.1f}"
+    return str(value)
+
+
+class AdvancedStatsDialog(QDialog):
+    def __init__(self, store: HistoryStore, match: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Advanced match stats")
+        self.resize(1100, 480)
+
+        layout = QVBoxLayout(self)
+
+        header = QLabel(self._header_text(match))
+        header.setStyleSheet("font-weight: bold;")
+        layout.addWidget(header)
+
+        rows = store.player_stats_for_match(match["match_guid"])
+        if not rows:
+            layout.addWidget(QLabel(
+                "No advanced stats recorded for this match. "
+                "(Only matches recorded after the v2 update have advanced stats.)"
+            ))
+            close = QPushButton("Close")
+            close.clicked.connect(self.accept)
+            layout.addWidget(close)
+            return
+
+        # Sort: team 0 first, then by goals desc, then name.
+        rows.sort(key=lambda r: (r["player_team"], -(r.get("goals") or 0), r["player_name"]))
+
+        # Build flat header.
+        flat_headers = ["Player", "Team"]
+        flat_fields: list[tuple[str, str]] = []
+        for group_label, items in _STAT_GROUPS:
+            for field, hdr, spec in items:
+                flat_headers.append(f"{group_label}\n{hdr}")
+                flat_fields.append((field, spec))
+
+        table = QTableWidget(len(rows), len(flat_headers))
+        table.setHorizontalHeaderLabels(flat_headers)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        for r_idx, r in enumerate(rows):
+            name_item = QTableWidgetItem(r["player_name"])
+            team_item = QTableWidgetItem("Blue" if r["player_team"] == 0 else "Orange")
+            team_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(r_idx, 0, name_item)
+            table.setItem(r_idx, 1, team_item)
+            for c_idx, (field, spec) in enumerate(flat_fields, start=2):
+                it = QTableWidgetItem(_fmt(r.get(field), spec))
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(r_idx, c_idx, it)
+        table.resizeColumnsToContents()
+        layout.addWidget(table, 1)
+
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(close)
+        layout.addLayout(btn_row)
+
+    @staticmethod
+    def _header_text(m: dict) -> str:
+        score = f"{m.get('team0_score', 0)}–{m.get('team1_score', 0)}"
+        ot = " (OT)" if m.get("overtime") else ""
+        return f"{m['playlist']}  ·  {_format_local(m['ended_at'])}  ·  {score}{ot}"

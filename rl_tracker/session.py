@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .history import HistoryStore, MatchRecord, PlayerRecord
+
+
+# Sample 1 in N UpdateState frames into match_ticks. Stats API runs ~30 Hz, so
+# N=15 -> ~2 Hz, plenty for boost / speed / possession aggregates.
+TICK_DECIMATION = 15
+
+
+def _f(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _now() -> datetime:
@@ -47,6 +62,14 @@ class _RosterSnapshot:
     team1_score: int = 0
     # Sticky: once true, stays true even if a later frame flips it back.
     overtime: bool = False
+    # Advanced-stats buffers
+    update_count: int = 0
+    next_seq: int = 0
+    next_event_seq: int = 0
+    last_t_seconds: float = 0.0
+    events: list[tuple] = field(default_factory=list)
+    ticks: list[tuple] = field(default_factory=list)
+    name_to_team: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -88,6 +111,14 @@ class SessionState:
 
         if name == "updatestate":
             self._on_update_state(data)
+        elif name == "ballhit":
+            self._on_ball_hit(data)
+        elif name == "goalscored":
+            self._on_goal_scored(data)
+        elif name == "crossbarhit":
+            self._on_crossbar(data)
+        elif name == "statfeedevent":
+            self._on_statfeed(data)
         elif name in ("matchended", "match_ended"):
             self._on_match_ended(data)
 
@@ -138,7 +169,12 @@ class SessionState:
             )
 
         snap = self._rosters[guid]
+        for p in players:
+            snap.name_to_team[p["Name"]] = p["TeamNum"]
         game = self._get(data, "Game", "game")
+        t_seconds = 0.0
+        ball_speed: float | None = None
+        ball_team: int | None = None
         if isinstance(game, dict):
             teams = self._get(game, "Teams", "teams")
             if isinstance(teams, list):
@@ -158,6 +194,221 @@ class SessionState:
                         snap.team1_score = score_i
             if bool(self._get(game, "bOvertime", "b_overtime", default=False)):
                 snap.overtime = True
+            try:
+                t_seconds = float(self._get(game, "TimeSeconds", "time_seconds", default=0) or 0)
+            except (TypeError, ValueError):
+                t_seconds = 0.0
+            ball = self._get(game, "Ball", "ball")
+            if isinstance(ball, dict):
+                try:
+                    ball_speed = float(self._get(ball, "Speed", "speed", default=0) or 0)
+                except (TypeError, ValueError):
+                    ball_speed = None
+                bt = self._get(ball, "TeamNum", "team_num")
+                try:
+                    ball_team = int(bt) if bt is not None else None
+                except (TypeError, ValueError):
+                    ball_team = None
+        snap.last_t_seconds = t_seconds
+
+        # Decimated tick samples for advanced stats.
+        snap.update_count += 1
+        if snap.update_count % TICK_DECIMATION == 0:
+            seq = snap.next_seq
+            snap.next_seq += 1
+            for p_raw in players_raw:
+                if not isinstance(p_raw, dict):
+                    continue
+                name = self._get(p_raw, "Name", "name")
+                team = self._get(p_raw, "TeamNum", "team_num")
+                if name is None or team is None:
+                    continue
+                boost = self._get(p_raw, "Boost", "boost")
+                speed = self._get(p_raw, "Speed", "speed")
+                b_boosting = self._get(p_raw, "bBoosting", "b_boosting", default=False)
+                b_on_ground = self._get(p_raw, "bOnGround", "b_on_ground", default=False)
+                snap.ticks.append((
+                    seq, t_seconds, str(name), int(team),
+                    None if boost is None else float(boost),
+                    None if speed is None else float(speed),
+                    1 if b_boosting else 0,
+                    1 if b_on_ground else 0,
+                    ball_speed,
+                    ball_team,
+                ))
+
+    def _snap_for(self, data: dict[str, Any]) -> _RosterSnapshot | None:
+        guid = self._get(data, "MatchGuid", "match_guid")
+        if not guid:
+            return None
+        return self._rosters.get(guid)
+
+    def _next_event_seq(self, snap: _RosterSnapshot) -> int:
+        n = snap.next_event_seq
+        snap.next_event_seq += 1
+        return n
+
+    def _player_team(self, snap: _RosterSnapshot, p: dict[str, Any]) -> int | None:
+        t = self._get(p, "TeamNum", "team_num")
+        if t is not None:
+            try:
+                return int(t)
+            except (TypeError, ValueError):
+                pass
+        name = self._get(p, "Name", "name")
+        if name is not None:
+            return snap.name_to_team.get(str(name))
+        return None
+
+    def _on_ball_hit(self, data: dict[str, Any]) -> None:
+        snap = self._snap_for(data)
+        if snap is None:
+            return
+        ball = self._get(data, "Ball", "ball") or {}
+        loc = ball.get("Location") or ball.get("location") or {}
+        try:
+            pre = float(ball.get("PreHitSpeed", ball.get("pre_hit_speed", 0)) or 0)
+            post = float(ball.get("PostHitSpeed", ball.get("post_hit_speed", 0)) or 0)
+        except (TypeError, ValueError):
+            pre = post = 0.0
+        bx = loc.get("X", loc.get("x"))
+        by = loc.get("Y", loc.get("y"))
+        bz = loc.get("Z", loc.get("z"))
+        players = self._get(data, "Players", "players") or []
+        if not isinstance(players, list) or not players:
+            return
+        # Single touch -> kind 'ball_hit'; two players -> '50_50' (both get a row).
+        kind = "fifty" if len(players) >= 2 else "ball_hit"
+        for p in players:
+            if not isinstance(p, dict):
+                continue
+            name = self._get(p, "Name", "name")
+            team = self._player_team(snap, p)
+            seq = self._next_event_seq(snap)
+            snap.events.append((
+                seq, snap.last_t_seconds, kind,
+                None if name is None else str(name),
+                team,
+                None, None,
+                _f(bx), _f(by), _f(bz),
+                pre, post,
+                None, None, None, None,
+            ))
+
+    def _on_goal_scored(self, data: dict[str, Any]) -> None:
+        snap = self._snap_for(data)
+        if snap is None:
+            return
+        scorer = self._get(data, "Scorer", "scorer") or {}
+        assister = self._get(data, "Assister", "assister") or {}
+        last_touch = self._get(data, "BallLastTouch", "ball_last_touch") or {}
+        last_touch_player = last_touch.get("Player") or last_touch.get("player") or {}
+        try:
+            last_speed = float(last_touch.get("Speed", last_touch.get("speed", 0)) or 0)
+        except (TypeError, ValueError):
+            last_speed = 0.0
+        try:
+            goal_speed = float(self._get(data, "GoalSpeed", "goal_speed", default=0) or 0)
+            goal_time = float(self._get(data, "GoalTime", "goal_time", default=0) or 0)
+        except (TypeError, ValueError):
+            goal_speed = goal_time = 0.0
+        impact = self._get(data, "ImpactLocation", "impact_location") or {}
+        scorer_name = self._get(scorer, "Name", "name") if isinstance(scorer, dict) else None
+        assister_name = (
+            self._get(assister, "Name", "name") if isinstance(assister, dict) else None
+        )
+        last_touch_name = (
+            self._get(last_touch_player, "Name", "name")
+            if isinstance(last_touch_player, dict)
+            else None
+        )
+        if not scorer_name:
+            # Empty Scorer rows fire on round end resets — skip.
+            if not last_touch_name:
+                return
+        scorer_team = self._player_team(snap, scorer) if isinstance(scorer, dict) else None
+        seq = self._next_event_seq(snap)
+        extra = json.dumps({
+            "assister": assister_name,
+            "last_touch": last_touch_name,
+            "last_touch_speed": last_speed,
+        })
+        snap.events.append((
+            seq, snap.last_t_seconds, "goal",
+            None if not scorer_name else str(scorer_name),
+            scorer_team,
+            None if not assister_name else str(assister_name),
+            self._player_team(snap, assister) if isinstance(assister, dict) else None,
+            _f(impact.get("X", impact.get("x"))),
+            _f(impact.get("Y", impact.get("y"))),
+            _f(impact.get("Z", impact.get("z"))),
+            None, None,
+            goal_speed, goal_time, None,
+            extra,
+        ))
+
+    def _on_crossbar(self, data: dict[str, Any]) -> None:
+        snap = self._snap_for(data)
+        if snap is None:
+            return
+        loc = self._get(data, "BallLocation", "ball_location") or {}
+        try:
+            ball_speed = float(self._get(data, "BallSpeed", "ball_speed", default=0) or 0)
+            impact_force = float(self._get(data, "ImpactForce", "impact_force", default=0) or 0)
+        except (TypeError, ValueError):
+            ball_speed = impact_force = 0.0
+        last_touch = self._get(data, "BallLastTouch", "ball_last_touch") or {}
+        last_player = last_touch.get("Player") or last_touch.get("player") or {}
+        last_name = self._get(last_player, "Name", "name") if isinstance(last_player, dict) else None
+        last_team = self._player_team(snap, last_player) if isinstance(last_player, dict) else None
+        seq = self._next_event_seq(snap)
+        snap.events.append((
+            seq, snap.last_t_seconds, "crossbar",
+            None if not last_name else str(last_name),
+            last_team,
+            None, None,
+            _f(loc.get("X", loc.get("x"))),
+            _f(loc.get("Y", loc.get("y"))),
+            _f(loc.get("Z", loc.get("z"))),
+            None, ball_speed,
+            None, None, impact_force,
+            None,
+        ))
+
+    def _on_statfeed(self, data: dict[str, Any]) -> None:
+        snap = self._snap_for(data)
+        if snap is None:
+            return
+        ev_name = str(self._get(data, "EventName", "event_name", default="") or "")
+        if not ev_name:
+            return
+        kind_map = {
+            "Demolish": "demo",
+            "Shot": "shot",
+            "EpicSave": "epic_save",
+            "Save": "save",
+            "Goal": "sf_goal",
+            "Assist": "sf_assist",
+        }
+        kind = kind_map.get(ev_name)
+        if kind is None:
+            return  # ignore Win, MVP, etc.
+        main = self._get(data, "MainTarget", "main_target") or {}
+        sec = self._get(data, "SecondaryTarget", "secondary_target") or {}
+        main_name = self._get(main, "Name", "name") if isinstance(main, dict) else None
+        sec_name = self._get(sec, "Name", "name") if isinstance(sec, dict) else None
+        seq = self._next_event_seq(snap)
+        snap.events.append((
+            seq, snap.last_t_seconds, kind,
+            None if not main_name else str(main_name),
+            self._player_team(snap, main) if isinstance(main, dict) else None,
+            None if not sec_name else str(sec_name),
+            self._player_team(snap, sec) if isinstance(sec, dict) else None,
+            None, None, None,
+            None, None,
+            None, None, None,
+            None,
+        ))
 
     def _on_match_ended(self, data: dict[str, Any]) -> None:
         guid = str(self._get(data, "MatchGuid", "match_guid", "guid", default=""))
@@ -253,13 +504,23 @@ class SessionState:
                 self.streak_count = 1
 
         self._recorded.add(guid)
-        self._rosters.pop(guid, None)
 
         if self.history is not None:
             try:
-                self.history.record(record)
+                match_id = self.history.record_with_id(record)
             except Exception:
-                pass
+                match_id = None
+            if match_id is not None:
+                try:
+                    if snap.events:
+                        self.history.insert_events(match_id, snap.events)
+                    if snap.ticks:
+                        self.history.insert_ticks(match_id, snap.ticks)
+                    from . import advanced_stats
+                    advanced_stats.compute_match_stats(self.history, match_id, record)
+                except Exception:
+                    pass
+        self._rosters.pop(guid, None)
         if self.on_match_recorded is not None:
             try:
                 self.on_match_recorded(record)
