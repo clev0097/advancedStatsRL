@@ -278,6 +278,67 @@ def test_match_without_game_payload_defaults_zero(store: HistoryStore):
     assert r["overtime"] is False
 
 
+class _StubWatcher:
+    def __init__(self, snap):
+        self._snap = snap
+
+    def snapshot(self):
+        return self._snap
+
+
+class _StubSnap:
+    def __init__(self, playlist_id, playlist_label, seen_at):
+        self.playlist_id = playlist_id
+        self.playlist_label = playlist_label
+        self.seen_at = seen_at
+
+
+def test_log_watcher_label_overrides_size_derived_playlist(store: HistoryStore):
+    from datetime import datetime, timezone
+    snap = _StubSnap(11, "Ranked Doubles", datetime.now(timezone.utc))
+    s = SessionState(history=store, my_platform_id=ME, playlist_watcher=_StubWatcher(snap))
+    s.apply(update_state("g1", [(ME, "Me", 1), (MATE, "F", 1), (OPP1, "X", 0), (OPP2, "Y", 0)]))
+    s.apply(match_ended("g1", winner_team=1))
+
+    assert s.by_playlist["Ranked Doubles"].wins == 1
+    assert "doubles" not in s.by_playlist
+    r = store.recent()[0]
+    assert r["playlist"] == "Ranked Doubles"
+    assert r["playlist_id"] == 11
+
+
+def test_log_watcher_absent_falls_back_to_size_label(store: HistoryStore):
+    s = SessionState(history=store, my_platform_id=ME, playlist_watcher=None)
+    s.apply(update_state("g1", [(ME, "Me", 1), (MATE, "F", 1), (OPP1, "X", 0), (OPP2, "Y", 0)]))
+    s.apply(match_ended("g1", winner_team=1))
+    r = store.recent()[0]
+    assert r["playlist"] == "doubles"
+    assert r["playlist_id"] is None
+
+
+def test_log_watcher_with_no_snapshot_falls_back(store: HistoryStore):
+    snap = _StubSnap(None, None, None)
+    s = SessionState(history=store, my_platform_id=ME, playlist_watcher=_StubWatcher(snap))
+    s.apply(update_state("g1", [(ME, "Me", 1), (MATE, "F", 1), (OPP1, "X", 0), (OPP2, "Y", 0)]))
+    s.apply(match_ended("g1", winner_team=1))
+    r = store.recent()[0]
+    assert r["playlist"] == "doubles"
+    assert r["playlist_id"] is None
+
+
+def test_log_watcher_stale_snapshot_is_ignored(store: HistoryStore):
+    """A snapshot from before the match started (>60s prior) should not be applied."""
+    from datetime import datetime, timedelta, timezone
+    stale = datetime.now(timezone.utc) - timedelta(hours=2)
+    snap = _StubSnap(34, "Tournament", stale)
+    s = SessionState(history=store, my_platform_id=ME, playlist_watcher=_StubWatcher(snap))
+    s.apply(update_state("g1", [(ME, "Me", 1), (MATE, "F", 1), (OPP1, "X", 0), (OPP2, "Y", 0)]))
+    s.apply(match_ended("g1", winner_team=1))
+    r = store.recent()[0]
+    assert r["playlist"] == "doubles"
+    assert r["playlist_id"] is None
+
+
 def test_history_store_migrates_legacy_schema(tmp_path):
     import sqlite3
     db = tmp_path / "legacy.db"
@@ -317,4 +378,5 @@ def test_history_store_migrates_legacy_schema(tmp_path):
     assert r[0]["team0_score"] == 0
     assert r[0]["team1_score"] == 0
     assert r[0]["overtime"] is False
+    assert r[0]["playlist_id"] is None
     store2.close()

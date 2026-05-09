@@ -567,11 +567,15 @@ class AdvancedHistoryTab(QWidget):
 
     def _build_group_order_panel(self, parent: QVBoxLayout) -> None:
         box = QGroupBox("Group && order")
+        box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         v = QVBoxLayout(box)
 
         v.addWidget(QLabel("Group by (check in desired order — top first):"))
         self._group_list = QListWidget()
-        self._group_list.setMaximumHeight(170)
+        self._group_list.setMinimumHeight(240)
+        self._group_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self._group_list.setDragDropMode(
             QAbstractItemView.DragDropMode.InternalMove
         )

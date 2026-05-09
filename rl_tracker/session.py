@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Protocol
 
 from .history import HistoryStore, MatchRecord, PlayerRecord
+
+
+class _PlaylistSnapshotProvider(Protocol):
+    def snapshot(self) -> Any: ...
 
 
 # Sample 1 in N UpdateState frames into match_ticks. Stats API runs ~30 Hz, so
@@ -81,6 +85,7 @@ class SessionState:
     on_match_recorded: Callable[[MatchRecord], None] | None = None
     streak_count: int = 0
     streak_kind: str | None = None  # "W", "L", or None
+    playlist_watcher: _PlaylistSnapshotProvider | None = None
 
     # match_guid -> latest roster snapshot
     _rosters: dict[str, _RosterSnapshot] = field(default_factory=dict, repr=False)
@@ -463,6 +468,21 @@ class SessionState:
         # that a mid-match ragequit doesn't reclassify e.g. duels as 1v0.
         team_sizes = snap.max_team_sizes
         playlist = _PLAYLIST_BY_SIZE.get(team_sizes, f"{team_sizes[0]}v{team_sizes[1]}")
+        playlist_id: int | None = None
+        if self.playlist_watcher is not None:
+            try:
+                pl_snap = self.playlist_watcher.snapshot()
+            except Exception:
+                pl_snap = None
+            pid = getattr(pl_snap, "playlist_id", None)
+            seen_at = getattr(pl_snap, "seen_at", None)
+            label = getattr(pl_snap, "playlist_label", None)
+            if pid is not None and seen_at is not None:
+                # Reject stale snapshots from a prior match.
+                if seen_at >= snap.started_at - timedelta(seconds=60):
+                    playlist_id = int(pid)
+                    if label:
+                        playlist = str(label)
 
         won: bool | None
         if my_team is not None and winner_team_int is not None:
@@ -483,6 +503,7 @@ class SessionState:
             team0_score=snap.team0_score,
             team1_score=snap.team1_score,
             overtime=snap.overtime,
+            playlist_id=playlist_id,
         )
 
         # Update session tally.

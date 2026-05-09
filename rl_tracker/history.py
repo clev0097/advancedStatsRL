@@ -28,6 +28,7 @@ class MatchRecord:
     team0_score: int = 0
     team1_score: int = 0
     overtime: bool = False
+    playlist_id: int | None = None  # numeric queue ID from Launch.log, when known
 
 
 @dataclass
@@ -58,7 +59,8 @@ CREATE TABLE IF NOT EXISTS matches (
     winner_team   INTEGER,
     team0_score   INTEGER NOT NULL DEFAULT 0,
     team1_score   INTEGER NOT NULL DEFAULT 0,
-    overtime      INTEGER NOT NULL DEFAULT 0
+    overtime      INTEGER NOT NULL DEFAULT 0,
+    playlist_id   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS match_players (
@@ -196,6 +198,7 @@ class HistoryStore:
             ("team0_score", "INTEGER NOT NULL DEFAULT 0"),
             ("team1_score", "INTEGER NOT NULL DEFAULT 0"),
             ("overtime", "INTEGER NOT NULL DEFAULT 0"),
+            ("playlist_id", "INTEGER"),
         ):
             if col not in existing:
                 cur.execute(f"ALTER TABLE matches ADD COLUMN {col} {ddl}")
@@ -215,8 +218,8 @@ class HistoryStore:
         cur = self._conn.cursor()
         try:
             cur.execute(
-                "INSERT INTO matches (match_guid, playlist, started_at, ended_at, won, my_team, winner_team, team0_score, team1_score, overtime) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO matches (match_guid, playlist, started_at, ended_at, won, my_team, winner_team, team0_score, team1_score, overtime, playlist_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     match.match_guid,
                     match.playlist,
@@ -228,6 +231,7 @@ class HistoryStore:
                     int(match.team0_score),
                     int(match.team1_score),
                     int(match.overtime),
+                    match.playlist_id,
                 ),
             )
         except sqlite3.IntegrityError:
@@ -410,7 +414,7 @@ class HistoryStore:
         cur = self._conn.cursor()
         sql = (
             "SELECT id, match_guid, playlist, started_at, ended_at, won, my_team, winner_team, "
-            "team0_score, team1_score, overtime "
+            "team0_score, team1_score, overtime, playlist_id "
             "FROM matches ORDER BY ended_at DESC"
         )
         params: tuple = ()
@@ -432,6 +436,7 @@ class HistoryStore:
             team0_score,
             team1_score,
             overtime,
+            playlist_id,
         ) in rows:
             cur.execute(
                 "SELECT platform_id, name, team, is_me FROM match_players WHERE match_id = ?",
@@ -445,6 +450,7 @@ class HistoryStore:
                 {
                     "match_guid": guid,
                     "playlist": playlist,
+                    "playlist_id": None if playlist_id is None else int(playlist_id),
                     "started_at": started_at,
                     "ended_at": ended_at,
                     "won": None if won is None else bool(won),
