@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -377,7 +378,6 @@ class AdvancedHistoryTab(QWidget):
         btn_row.addWidget(reset_btn)
         btn_row.addStretch(1)
         left_layout.addLayout(btn_row)
-        left_layout.addStretch(1)
 
         # Right side: results table.
         self._table = QTableWidget(0, 0)
@@ -388,7 +388,7 @@ class AdvancedHistoryTab(QWidget):
         splitter.addWidget(self._table)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([360, 760])
+        splitter.setSizes([520, 880])
 
         self._table.cellDoubleClicked.connect(self._on_row_double_clicked)
 
@@ -410,6 +410,7 @@ class AdvancedHistoryTab(QWidget):
     # ---------------- panel construction ----------------
     def _build_filters_panel(self, parent: QVBoxLayout) -> None:
         box = QGroupBox("Filters")
+        box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         grid = QGridLayout(box)
 
         self._playlist_inc = self._make_list()
@@ -460,18 +461,21 @@ class AdvancedHistoryTab(QWidget):
         r += 1
         grid.addWidget(self._playlist_inc, r, 0)
         grid.addWidget(self._playlist_exc, r, 1)
+        grid.setRowStretch(r, 1)
         r += 1
         grid.addWidget(QLabel("Teammate include"), r, 0)
         grid.addWidget(QLabel("Teammate exclude"), r, 1)
         r += 1
         grid.addWidget(self._teammate_inc, r, 0)
         grid.addWidget(self._teammate_exc, r, 1)
+        grid.setRowStretch(r, 1)
         r += 1
         grid.addWidget(QLabel("Opponent include"), r, 0)
         grid.addWidget(QLabel("Opponent exclude"), r, 1)
         r += 1
         grid.addWidget(self._opponent_inc, r, 0)
         grid.addWidget(self._opponent_exc, r, 1)
+        grid.setRowStretch(r, 1)
         r += 1
         grid.addWidget(QLabel("Result"), r, 0)
         grid.addWidget(self._result_combo, r, 1)
@@ -501,7 +505,8 @@ class AdvancedHistoryTab(QWidget):
     def _make_list(self) -> QListWidget:
         w = QListWidget()
         w.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        w.setMaximumHeight(110)
+        w.setMinimumHeight(180)
+        w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         return w
 
     def _build_group_order_panel(self, parent: QVBoxLayout) -> None:

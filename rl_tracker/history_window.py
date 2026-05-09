@@ -55,7 +55,7 @@ class HistoryWindow(QWidget):
         super().__init__(None)
         self.setWindowTitle("RL Tracker — Match history")
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
-        self.resize(720, 520)
+        self.resize(1200, 780)
         self._store = store
         self._on_set_platform_id = on_set_platform_id
 
