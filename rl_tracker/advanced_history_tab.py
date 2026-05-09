@@ -30,10 +30,12 @@ from PyQt6.QtWidgets import (
 
 from .config import (
     load_advanced_view,
+    load_friends,
     load_my_platform_id,
     load_session_gap_minutes,
     save_advanced_view,
 )
+from .friends_dialog import ManageFriendsDialog
 from .history import HistoryStore, assign_sessions
 
 
@@ -100,6 +102,8 @@ def apply_filters(matches: list[dict], f: dict, gap_minutes: int) -> list[dict]:
     tm_exc = set(f.get("teammate_exclude") or [])
     op_inc = set(f.get("opponent_include") or [])
     op_exc = set(f.get("opponent_exclude") or [])
+    friends_mode = f.get("friends_mode") or "any"
+    friends_set = set(f.get("friends") or [])
     result = f.get("result") or "any"
     ot = f.get("overtime") or "any"
     date_from = _parse_dt(f.get("date_from"))
@@ -126,6 +130,13 @@ def apply_filters(matches: list[dict], f: dict, gap_minutes: int) -> list[dict]:
             continue
         if op_exc and not op_exc.isdisjoint(op_ids):
             continue
+
+        if friends_mode != "any" and friends_set:
+            has_friend = bool(friends_set & tm_ids)
+            if friends_mode == "with" and not has_friend:
+                continue
+            if friends_mode == "solo" and has_friend:
+                continue
 
         won = m.get("won")
         if result == "win" and won is not True:
@@ -219,6 +230,8 @@ GROUP_FIELDS: list[tuple[str, str]] = [
     ("date", "Date (day)"),
     ("my_team", "My team #"),
     ("overtime", "Overtime"),
+    ("friend_presence", "Friend presence (with/solo)"),
+    ("friend_set", "Friend set on my team"),
 ]
 
 # Map: field_id -> (key_func(match) -> hashable, label_func(match) -> str)
@@ -240,10 +253,15 @@ GROUP_EXTRACTORS: dict[str, tuple[Callable[[dict], Hashable], Callable[[dict], s
 
 
 def group_and_aggregate(
-    matches: list[dict], group_fields: list[str], gap_minutes: int
+    matches: list[dict],
+    group_fields: list[str],
+    gap_minutes: int,
+    friends: set[str] | None = None,
 ) -> list[dict]:
     if not group_fields:
         return []
+
+    friends = friends or set()
 
     # Pre-compute session ids for the whole filtered set if needed.
     session_id: dict[str, int] = {}
@@ -257,11 +275,27 @@ def group_and_aggregate(
         )
         session_id = {sorted_asc[i]["match_guid"]: s for i, s in enumerate(sess)}
 
+    def _friends_on_team(m: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        ids = []
+        names = []
+        for p in _teammates(m):
+            if p["platform_id"] in friends:
+                ids.append(p["platform_id"])
+                names.append(p["name"])
+        order = sorted(range(len(ids)), key=lambda i: (names[i].lower(), ids[i]))
+        return tuple(ids[i] for i in order), tuple(names[i] for i in order)
+
     def key_for(m: dict) -> tuple:
         parts = []
         for f in group_fields:
             if f == "session":
                 parts.append(session_id.get(m["match_guid"], -1))
+            elif f == "friend_presence":
+                fids, _ = _friends_on_team(m)
+                parts.append("with" if fids else "solo")
+            elif f == "friend_set":
+                fids, _ = _friends_on_team(m)
+                parts.append(fids)
             else:
                 parts.append(GROUP_EXTRACTORS[f][0](m))
         return tuple(parts)
@@ -271,6 +305,12 @@ def group_and_aggregate(
             sid = session_id.get(m["match_guid"], -1)
             # Label session by its earliest end time.
             return f"Session #{sid + 1}"
+        if f == "friend_presence":
+            fids, _ = _friends_on_team(m)
+            return "With friends" if fids else "Solo"
+        if f == "friend_set":
+            _, names = _friends_on_team(m)
+            return ", ".join(names) if names else "Solo"
         return GROUP_EXTRACTORS[f][1](m)
 
     buckets: dict[tuple, list[dict]] = defaultdict(list)
@@ -428,6 +468,16 @@ class AdvancedHistoryTab(QWidget):
         for k, lbl in (("any", "Any"), ("ot", "OT only"), ("no_ot", "Non-OT only")):
             self._ot_combo.addItem(lbl, k)
 
+        self._friends_combo = QComboBox()
+        for k, lbl in (
+            ("any", "Any"),
+            ("with", "With friends"),
+            ("solo", "Solo (no friends)"),
+        ):
+            self._friends_combo.addItem(lbl, k)
+        self._manage_friends_btn = QPushButton("Manage friends…")
+        self._manage_friends_btn.clicked.connect(self._open_friends_dialog)
+
         self._date_from = QDateEdit()
         self._date_from.setCalendarPopup(True)
         self._date_from.setSpecialValueText(" ")
@@ -482,6 +532,12 @@ class AdvancedHistoryTab(QWidget):
         r += 1
         grid.addWidget(QLabel("Overtime"), r, 0)
         grid.addWidget(self._ot_combo, r, 1)
+        r += 1
+        grid.addWidget(QLabel("Friends"), r, 0)
+        friends_row = QHBoxLayout()
+        friends_row.addWidget(self._friends_combo, 1)
+        friends_row.addWidget(self._manage_friends_btn)
+        grid.addLayout(friends_row, r, 1)
         r += 1
         grid.addWidget(QLabel("Date from"), r, 0)
         grid.addWidget(self._date_from, r, 1)
@@ -595,6 +651,12 @@ class AdvancedHistoryTab(QWidget):
                 parent.deleteLater()
         self._order_rows.clear()
 
+    def _open_friends_dialog(self) -> None:
+        dlg = ManageFriendsDialog(self, self._store)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._render()
+            self._save_state()
+
     def _clear_dates(self) -> None:
         self._date_from.setDate(self._date_from.minimumDate())
         self._date_to.setDate(self._date_to.minimumDate())
@@ -704,6 +766,8 @@ class AdvancedHistoryTab(QWidget):
             "teammate_exclude": self._selected_values(self._teammate_exc),
             "opponent_include": self._selected_values(self._opponent_inc),
             "opponent_exclude": self._selected_values(self._opponent_exc),
+            "friends_mode": self._friends_combo.currentData(),
+            "friends": load_friends(),
             "result": self._result_combo.currentData(),
             "overtime": self._ot_combo.currentData(),
             "date_from": dt_from.isoformat() if dt_from else None,
@@ -741,6 +805,7 @@ class AdvancedHistoryTab(QWidget):
             w.clearSelection()
         self._result_combo.setCurrentIndex(0)
         self._ot_combo.setCurrentIndex(0)
+        self._friends_combo.setCurrentIndex(0)
         self._clear_dates()
         self._diff_min.setValue(-99)
         self._diff_max.setValue(99)
@@ -761,7 +826,9 @@ class AdvancedHistoryTab(QWidget):
         limit = self._row_limit.value()
 
         if groups:
-            rows = group_and_aggregate(filtered, groups, gap)
+            rows = group_and_aggregate(
+                filtered, groups, gap, friends=set(filters.get("friends") or [])
+            )
             rows = order_rows(rows, spec)
             self._render_grouped(groups, rows[:limit])
         else:
@@ -851,8 +918,11 @@ class AdvancedHistoryTab(QWidget):
 
     # ---------------- persistence ----------------
     def _state_dict(self) -> dict:
+        filters = self._collect_filters()
+        # `friends` lives in its own settings entry; don't duplicate it here.
+        filters.pop("friends", None)
         return {
-            "filters": self._collect_filters(),
+            "filters": filters,
             "groups": self._collect_group_fields(),
             "order": self._collect_order_spec(),
             "row_limit": self._row_limit.value(),
@@ -886,6 +956,10 @@ class AdvancedHistoryTab(QWidget):
         i = self._ot_combo.findData(ok)
         if i >= 0:
             self._ot_combo.setCurrentIndex(i)
+        fk = f.get("friends_mode") or "any"
+        i = self._friends_combo.findData(fk)
+        if i >= 0:
+            self._friends_combo.setCurrentIndex(i)
         df = _parse_dt(f.get("date_from"))
         if df:
             self._date_from.setDate(QDate(df.year, df.month, df.day))

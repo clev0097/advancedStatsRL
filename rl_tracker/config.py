@@ -84,6 +84,32 @@ def save_advanced_view(view: dict) -> None:
     settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def load_friends() -> list[str]:
+    import json
+
+    try:
+        data = json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    val = data.get("friends")
+    if not isinstance(val, list):
+        return []
+    return [s for s in val if isinstance(s, str) and s]
+
+
+def save_friends(friends: list[str]) -> None:
+    import json
+
+    settings_file().parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(settings_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    cleaned = sorted({s for s in friends if isinstance(s, str) and s})
+    data["friends"] = cleaned
+    settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def load_session_gap_minutes() -> int:
     import json
 
