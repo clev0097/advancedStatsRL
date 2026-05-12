@@ -8,6 +8,8 @@ from .config import history_db_path, load_my_platform_id
 from .history import HistoryStore
 from .ini_helper import ensure_stats_api_enabled
 from .log_watcher import LogPlaylistWatcher, default_log_path
+from .mmr_identity import PlayerIdentity
+from .mmr_session import MmrSession
 from .session import SessionState
 from .stats_client import StatsClient
 
@@ -39,6 +41,22 @@ def main() -> int:
         "--no-launch-log",
         action="store_true",
         help="Disable the Launch.log tail (no ranked-vs-casual detection).",
+    )
+    parser.add_argument(
+        "--no-mmr",
+        action="store_true",
+        help="Disable tracker.gg MMR polling.",
+    )
+    parser.add_argument(
+        "--mmr-platform",
+        choices=("steam", "epic"),
+        default=None,
+        help="Override MMR identity platform (skips Launch.log auto-detect).",
+    )
+    parser.add_argument(
+        "--mmr-id",
+        default=None,
+        help="Override MMR identity id (Steam ID64 or Epic display name).",
     )
     args = parser.parse_args()
 
@@ -77,13 +95,38 @@ def main() -> int:
     )
     client = StatsClient(dump_path=args.dump_events)
 
-    overlay = Overlay(session, client, history)
+    mmr_session: MmrSession | None = None
+    if not args.no_mmr:
+        identity_override: PlayerIdentity | None = None
+        if args.mmr_platform and args.mmr_id:
+            identity_override = PlayerIdentity(args.mmr_platform, args.mmr_id)
+        mmr_session = MmrSession(
+            log_path=(log_watcher.log_path if log_watcher is not None else None),
+            history=history,
+            identity_override=identity_override,
+        )
+
+    overlay = Overlay(session, client, history, mmr_session=mmr_session)
     client._on_status = overlay.set_status  # bind status updates to the overlay
+    if mmr_session is not None:
+        mmr_session._on_change = overlay.request_repaint  # type: ignore[attr-defined]
+        mmr_session.start()
+        prev_recorded = session.on_match_recorded
+        def _on_match(m, _prev=prev_recorded, _mmr=mmr_session):
+            if _prev is not None:
+                try:
+                    _prev(m)
+                except Exception:
+                    pass
+            _mmr.nudge()
+        session.on_match_recorded = _on_match
     client.start()
     overlay.show()
 
     if log_watcher is not None:
         app.aboutToQuit.connect(log_watcher.stop)
+    if mmr_session is not None:
+        app.aboutToQuit.connect(mmr_session.stop)
 
     return app.exec()
 

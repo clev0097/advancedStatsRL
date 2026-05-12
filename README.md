@@ -85,6 +85,25 @@ Data limitations worth knowing:
 - Roster members who never appear in a sampled tick get `None` for tick-derived stats.
 - xG-lite is a rough heuristic; it'll calibrate as you accumulate matches.
 
+## MMR tracking
+
+The overlay shows your per-session MMR change while you play, polled from
+[tracker.gg](https://tracker.gg). It identifies you automatically by reading
+your Steam ID / Epic display name out of Rocket League's `Launch.log`, then
+fetches the public ranked stats endpoint every ~30 s.
+
+- Total session delta and per-playlist breakdown render under the W/L lines.
+- Snapshots are persisted to `history.db` (`mmr_snapshots` table) so the
+  baseline survives a brief app restart inside the same session.
+- Right-click the overlay → **Reset MMR baseline** to start the delta from
+  the current rating.
+- Disable polling entirely with `--no-mmr`, or override the detected identity
+  with `--mmr-platform steam|epic --mmr-id <id>`.
+
+If tracker.gg starts blocking the request you'll see a `(tracker_blocked)`
+status line; the previous delta is preserved across transient failures so
+the UI doesn't flicker back to 0.
+
 ## Out of scope (v1)
 
-MMR tracking, OBS overlay mode. Planned for later.
+OBS overlay mode. Planned for later.

@@ -32,6 +32,19 @@ class MatchRecord:
 
 
 @dataclass
+class MmrSnapshotRow:
+    taken_at: datetime
+    platform: str
+    platform_id: str
+    playlist_id: int
+    rating: int
+    matches: int
+    playlist_name: str | None = None
+    tier_name: str | None = None
+    source: str = "tracker.gg"
+
+
+@dataclass
 class TeammateAggregate:
     teammates: tuple[str, ...]  # sorted platform IDs
     teammate_names: tuple[str, ...]
@@ -112,6 +125,22 @@ CREATE TABLE IF NOT EXISTS match_ticks (
     PRIMARY KEY (match_id, seq, player_name)
 );
 CREATE INDEX IF NOT EXISTS idx_match_ticks_player ON match_ticks(match_id, player_name);
+
+CREATE TABLE IF NOT EXISTS mmr_snapshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at      TEXT NOT NULL,
+    platform      TEXT NOT NULL,
+    platform_id   TEXT NOT NULL,
+    playlist_id   INTEGER NOT NULL,
+    playlist_name TEXT,
+    rating        INTEGER NOT NULL,
+    matches       INTEGER NOT NULL,
+    tier_name     TEXT,
+    source        TEXT NOT NULL DEFAULT 'tracker.gg'
+);
+CREATE INDEX IF NOT EXISTS idx_mmr_snap_taken ON mmr_snapshots(taken_at);
+CREATE INDEX IF NOT EXISTS idx_mmr_snap_pid_playlist
+    ON mmr_snapshots(platform_id, playlist_id, taken_at);
 
 CREATE TABLE IF NOT EXISTS player_match_stats (
     match_id              INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
@@ -403,6 +432,112 @@ class HistoryStore:
             )
         )
         return out
+
+    # --- MMR snapshots ------------------------------------------------
+    def insert_mmr_snapshot_rows(
+        self,
+        rows: Iterable[MmrSnapshotRow],
+    ) -> int:
+        """Insert MMR snapshot rows. Skips rows whose (rating, matches) tuple
+        matches the most recent row for the same (platform_id, playlist_id) —
+        avoids growing the table while the user idles between matches.
+
+        Returns the number of rows actually inserted.
+        """
+        cur = self._conn.cursor()
+        inserted = 0
+        for row in rows:
+            cur.execute(
+                "SELECT rating, matches FROM mmr_snapshots "
+                "WHERE platform_id = ? AND playlist_id = ? "
+                "ORDER BY taken_at DESC LIMIT 1",
+                (row.platform_id, int(row.playlist_id)),
+            )
+            last = cur.fetchone()
+            if last is not None and int(last[0]) == int(row.rating) and int(last[1]) == int(row.matches):
+                continue
+            cur.execute(
+                "INSERT INTO mmr_snapshots "
+                "(taken_at, platform, platform_id, playlist_id, playlist_name, "
+                "rating, matches, tier_name, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row.taken_at.isoformat(),
+                    row.platform,
+                    row.platform_id,
+                    int(row.playlist_id),
+                    row.playlist_name,
+                    int(row.rating),
+                    int(row.matches),
+                    row.tier_name,
+                    row.source,
+                ),
+            )
+            inserted += 1
+        if inserted:
+            self._conn.commit()
+        return inserted
+
+    def latest_mmr_per_playlist(self, platform_id: str) -> dict[int, MmrSnapshotRow]:
+        """Return the most recent snapshot row per playlist for ``platform_id``."""
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT s.taken_at, s.platform, s.platform_id, s.playlist_id, "
+            "s.playlist_name, s.rating, s.matches, s.tier_name, s.source "
+            "FROM mmr_snapshots s "
+            "JOIN (SELECT playlist_id, MAX(taken_at) AS mt FROM mmr_snapshots "
+            "      WHERE platform_id = ? GROUP BY playlist_id) latest "
+            "ON latest.playlist_id = s.playlist_id AND latest.mt = s.taken_at "
+            "WHERE s.platform_id = ?",
+            (platform_id, platform_id),
+        )
+        out: dict[int, MmrSnapshotRow] = {}
+        for taken_at, platform, pid, plid, pname, rating, matches, tier, source in cur.fetchall():
+            out[int(plid)] = MmrSnapshotRow(
+                taken_at=datetime.fromisoformat(taken_at),
+                platform=platform,
+                platform_id=pid,
+                playlist_id=int(plid),
+                playlist_name=pname,
+                rating=int(rating),
+                matches=int(matches),
+                tier_name=tier,
+                source=source,
+            )
+        return out
+
+    def mmr_history(
+        self,
+        platform_id: str,
+        playlist_id: int,
+        since: datetime | None = None,
+    ) -> list[MmrSnapshotRow]:
+        cur = self._conn.cursor()
+        sql = (
+            "SELECT taken_at, platform, platform_id, playlist_id, playlist_name, "
+            "rating, matches, tier_name, source FROM mmr_snapshots "
+            "WHERE platform_id = ? AND playlist_id = ?"
+        )
+        params: list[object] = [platform_id, int(playlist_id)]
+        if since is not None:
+            sql += " AND taken_at >= ?"
+            params.append(since.isoformat())
+        sql += " ORDER BY taken_at ASC"
+        cur.execute(sql, params)
+        return [
+            MmrSnapshotRow(
+                taken_at=datetime.fromisoformat(taken_at),
+                platform=platform,
+                platform_id=pid,
+                playlist_id=int(plid),
+                playlist_name=pname,
+                rating=int(rating),
+                matches=int(matches),
+                tier_name=tier,
+                source=source,
+            )
+            for taken_at, platform, pid, plid, pname, rating, matches, tier, source in cur.fetchall()
+        ]
 
     def all_matches(self) -> list[dict]:
         return self._fetch_matches(limit=None)

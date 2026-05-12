@@ -9,8 +9,13 @@ from PyQt6.QtWidgets import QMenu, QWidget
 
 from .config import state_file
 from .history import HistoryStore
+from .mmr_session import MmrSession, MmrStatus
 from .session import SessionState
 from .stats_client import StatsClient
+
+
+def _signed(n: int) -> str:
+    return f"+{n}" if n > 0 else str(n)
 
 
 class Overlay(QWidget):
@@ -19,6 +24,7 @@ class Overlay(QWidget):
         session: SessionState,
         client: StatsClient,
         history: HistoryStore | None = None,
+        mmr_session: MmrSession | None = None,
     ) -> None:
         super().__init__(
             None,
@@ -33,6 +39,7 @@ class Overlay(QWidget):
         self._session = session
         self._client = client
         self._history = history
+        self._mmr = mmr_session
         self._history_window = None  # lazy
         self._status = "starting"
         self._click_through = False
@@ -69,6 +76,18 @@ class Overlay(QWidget):
         self._status = status
         self.update()
 
+    def request_repaint(self) -> None:
+        """Thread-safe-ish repaint trigger callable from worker threads.
+
+        Qt requires UI updates from the main thread; we rely on the existing
+        100 ms ``QTimer`` drain in ``_drain`` to pick up state changes. This
+        method just marks the widget dirty so the next paint reads MMR state.
+        """
+        try:
+            self.update()
+        except Exception:
+            pass
+
     # --- event drain -------------------------------------------------------
     def _drain(self) -> None:
         changed = False
@@ -104,6 +123,24 @@ class Overlay(QWidget):
         else:
             lines.append("  (no matches yet)")
 
+        if self._mmr is not None:
+            view = self._mmr.snapshot()
+            if view.status == MmrStatus.FAILED and view.failure_reason is not None:
+                lines.append(f"MMR  ({view.failure_reason.value})")
+            elif view.status in (MmrStatus.LOADING,) and not view.by_playlist:
+                lines.append("MMR  …")
+            else:
+                ranked_played = view.total_matches_delta
+                lines.append(
+                    f"MMR  {_signed(view.total_delta)}   (ranked {ranked_played})"
+                )
+                for pid in sorted(view.by_playlist.keys()):
+                    pd = view.by_playlist[pid]
+                    if pd.matches_delta <= 0 and pd.rating_delta == 0:
+                        continue
+                    name = pd.name or f"playlist_{pid}"
+                    lines.append(f"  {name:<14} {_signed(pd.rating_delta)}")
+
         y = 18
         for line in lines:
             p.drawText(10, y, line)
@@ -135,6 +172,11 @@ class Overlay(QWidget):
         reset_act.triggered.connect(self._reset)
         menu.addAction(reset_act)
 
+        if self._mmr is not None:
+            mmr_reset = QAction("Reset MMR baseline", self)
+            mmr_reset.triggered.connect(self._mmr.reset)
+            menu.addAction(mmr_reset)
+
         ct_act = QAction(
             "Disable click-through" if self._click_through else "Enable click-through",
             self,
@@ -157,6 +199,8 @@ class Overlay(QWidget):
 
     def _reset(self) -> None:
         self._session.reset()
+        if self._mmr is not None:
+            self._mmr.reset()
         self.update()
 
     def _open_history(self) -> None:

@@ -5,6 +5,7 @@ description = "Barebones Rocket League session tracker (W/L) using the local Sta
 requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.6",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
